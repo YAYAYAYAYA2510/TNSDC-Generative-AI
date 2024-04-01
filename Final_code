@@ -1,0 +1,166 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow
+import os
+from PIL import Image
+
+import tensorflow as tf
+from tensorflow.keras import layers, models
+
+# Define constants
+IMAGE_SIZE = (64, 64)
+BATCH_SIZE = 64
+EPOCHS = 50
+NOISE_DIM = 100
+LEARNING_RATE = 0.0002
+BETA_1 = 0.5
+
+# Define the generator network
+def build_generator():
+    model = models.Sequential()
+    model.add(layers.Dense(8 * 8 * 256, use_bias=False, input_shape=(NOISE_DIM,)))
+    model.add(layers.BatchNormalization())
+    model.add(layers.LeakyReLU())
+
+    model.add(layers.Reshape((8, 8, 256)))
+    assert model.output_shape == (None, 8, 8, 256) # None is the batch size
+
+    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False))
+    assert model.output_shape == (None, 8, 8, 128)
+    model.add(layers.BatchNormalization())
+    model.add(layers.LeakyReLU())
+
+    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False))
+    assert model.output_shape == (None, 16, 16, 64)
+    model.add(layers.BatchNormalization())
+    model.add(layers.LeakyReLU())
+
+    model.add(layers.Conv2DTranspose(3, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
+    assert model.output_shape == (None, 32, 32, 3)
+
+    return model
+
+# Define the discriminator network
+def build_discriminator():
+    model = models.Sequential()
+    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same', input_shape=[*IMAGE_SIZE, 3]))
+    model.add(layers.LeakyReLU())
+    model.add(layers.Dropout(0.3))
+
+    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
+    model.add(layers.LeakyReLU())
+    model.add(layers.Dropout(0.3))
+
+    model.add(layers.Flatten())
+    model.add(layers.Dense(1))
+
+    return model
+
+# Define the GAN model
+def build_gan(generator, discriminator):
+    discriminator.trainable = False
+    model = models.Sequential()
+    model.add(generator)
+    model.add(discriminator)
+
+    return model
+
+# Load and preprocess your dataset
+def load_dataset():
+    # Load dataset from CSV file
+    data = Image.open('/content/landscape1.zip')
+    # Assuming 'image_path' column contains paths to images
+    image_paths = data['/content/landscape1.zip'].values
+    images = []
+    for path in image_paths:
+        image = load_and_preprocess_image(path)
+        images.append(image)
+    images = np.array(images)
+    return images
+
+# Load and preprocess image from file path
+def load_and_preprocess_image(image_path):
+    image = Image.open(image_path)
+    image = image.resize(IMAGE_SIZE)
+    image = np.array(image) / 255.0
+    return image
+
+# Preprocess images
+def preprocess_images(images):
+    images = (images - 0.5) / 0.5  # Normalize to [-1, 1]
+    return images
+
+# Load real images batch
+def load_real_samples(dataset, batch_size):
+    idx = np.random.randint(0, dataset.shape[0], batch_size)
+    real_images = dataset[idx]
+    return real_images
+
+# Generate noise batch for generator input
+def generate_noise(batch_size, noise_dim):
+    return np.random.normal(0, 1, (batch_size, noise_dim))
+
+# Define the loss functions
+cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+
+# Discriminator loss
+def discriminator_loss(real_output, fake_output):
+    real_loss = cross_entropy(tf.ones_like(real_output), real_output)
+    fake_loss = cross_entropy(tf.zeros_like(fake_output), fake_output)
+    total_loss = real_loss + fake_loss
+    return total_loss
+
+# Generator loss
+def generator_loss(fake_output):
+    return cross_entropy(tf.ones_like(fake_output), fake_output)
+
+# Define optimizers
+generator_optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE, beta_1=BETA_1)
+discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE, beta_1=BETA_1)
+
+# Train the GAN
+def train_gan(generator, discriminator, gan, dataset, epochs, batch_size):
+    for epoch in range(epochs):
+        for batch in range(len(dataset)//batch_size):
+            # Train discriminator
+            noise = generate_noise(batch_size, NOISE_DIM)
+            real_images = load_real_samples(dataset, batch_size)
+            with tf.GradientTape() as disc_tape:
+                generated_images = generator(noise, training=True)
+                real_output = discriminator(real_images, training=True)
+                fake_output = discriminator(generated_images, training=True)
+                disc_loss = discriminator_loss(real_output, fake_output)
+            gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
+            discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
+
+            # Train generator
+            noise = generate_noise(batch_size, NOISE_DIM)
+            with tf.GradientTape() as gen_tape:
+                generated_images = generator(noise, training=True)
+                fake_output = discriminator(generated_images, training=True)
+                gen_loss = generator_loss(fake_output)
+            gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
+            generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
+
+            if batch % 100 == 0:
+                print(f"Epoch {epoch+1}, Batch {batch}/{len(dataset)//batch_size}, "
+                      f"Discriminator Loss: {disc_loss.numpy()}, Generator Loss: {gen_loss.numpy()}")
+
+# Generate new landscape images
+def generate_images(generator, num_images):
+    noise = generate_noise(num_images, NOISE_DIM)
+    generated_images = generator(noise, training=False)
+    return generated_images
+
+# Main function
+if __name__ == "__main__":
+    # Load and preprocess your dataset
+    dataset = load_dataset()
+    dataset = preprocess_images(dataset)
+
+    # Build the generator and discriminator
+    generator = build_generator()
+    discriminator = build_discriminator()
+
+    # Build and compile the GAN model
